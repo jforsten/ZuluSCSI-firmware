@@ -65,6 +65,7 @@
 #include "ZuluSCSI_initiator.h"
 #include "ZuluSCSI_msc_initiator.h"
 #include "ZuluSCSI_msc.h"
+#include "ZuluSCSI_usb_handoff.h"
 #include "ZuluSCSI_blink.h"
 #include "ZuluSCSI_buffer_control.h"
 #include "ZuluSCSI_audio.h"
@@ -2351,7 +2352,12 @@ extern "C" void zuluscsi_setup(void)
   }
 #endif
 
-  
+  // Offer removable-media images to a USB host while emulation runs.
+  // Does nothing unless USBMediaHandoff is set in the config file.
+  if (!is_initiator && g_sdcard_present)
+  {
+    usbHandoffInit();
+  }
 
   logmsg("Clock set to: ", (int) platform_sys_clock_in_hz(), "Hz");
 #if ZULUSCSI_RESERVED_SRAM_LEN > 0
@@ -2516,6 +2522,12 @@ extern "C" void zuluscsi_main_loop(void)
 
     scsiLogPhaseChange(scsiDev.phase);
 
+    // Media moves between the SCSI host and the USB host only between commands
+    if (scsiDev.phase == BUS_FREE)
+    {
+      usbHandoffPoll();
+    }
+
     // Save log periodically during status phase if there are new messages.
     // In debug mode, also save every 2 seconds if no SCSI requests come in.
     // SD card writing takes a while, during which the code can't handle new
@@ -2545,6 +2557,7 @@ extern "C" void zuluscsi_main_loop(void)
         if (!poll_sd_card())
         {
           g_sdcard_present = false;
+          usbHandoffRevokeAll();
           logmsg("SD card removed, trying to reinit");
 #ifdef ZULUCONTROL_FIRMWARE
           zuluWebUINotifySDCardRemoved();

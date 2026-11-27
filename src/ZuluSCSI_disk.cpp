@@ -65,6 +65,7 @@ extern "C" {
 #include "ZuluSCSI_sd_zero.h"
 #include "ZuluSCSI_unmap.h"
 #include "ZuluSCSI_gap_layout.h"
+#include "ZuluSCSI_usb_handoff.h"
 #endif
 
 #ifndef PLATFORM_MAX_SCSI_SPEED
@@ -305,6 +306,11 @@ void image_config_t::setDeviceType(S2S_CFG_TYPE device_type)
 
 void image_config_t::clear()
 {
+    if (usb_hold)
+    {
+        usbHandoffRevoke(scsiId & S2S_CFG_TARGET_ID_BITS);
+    }
+
     if (deviceType == S2S_CFG_SEQUENTIAL)
     {
         tapeDeinit(S2S_CFG_TARGET_ID_BITS & scsiId);
@@ -369,6 +375,9 @@ uint32_t image_config_t::get_capacity_lba()
 
 void scsiDiskCloseSDCardImages()
 {
+    // USB must not keep using the card sectors of images that are closed
+    usbHandoffRevokeAll();
+
     for (int i = 0; i < S2S_MAX_TARGETS; i++)
     {
         if (!g_DiskImages[i].file.isRom())
@@ -565,6 +574,11 @@ static bool isProcessorDevice(S2S_CFG_TYPE type)
 bool scsiDiskOpenHDDImage(int target_idx, const char *filename, int scsi_lun, int blocksize, S2S_CFG_TYPE type, bool use_prefix)
 {
     image_config_t &img = g_DiskImages[target_idx];
+
+    // The image of this target is about to be replaced. If USB has the media
+    // of the old one, it must stop using it first.
+    usbHandoffRevoke(target_idx);
+
     img.cuesheetfile.close();
     img.bin_container.close();
     img.cdrom_binfile_index = -1;
@@ -1365,6 +1379,13 @@ void scsiDiskCloseTray(image_config_t &img)
     if (img.ejected)
     {
         uint8_t target = img.scsiId & S2S_CFG_TARGET_ID_BITS;
+        if (img.usb_hold)
+        {
+            // The USB host has the media. Only the USB media handoff puts it
+            // back, whatever asks for a reinsert meanwhile.
+            dbgmsg("------ Device close tray on ID ", (int)target, " ignored, media is handed to USB");
+            return;
+        }
         // A finite tape set remains unloaded after its last IMG entry.
         // Do not silently reinsert the prior volume on INQUIRY or START.
         if (img.deviceType == S2S_CFG_SEQUENTIAL &&

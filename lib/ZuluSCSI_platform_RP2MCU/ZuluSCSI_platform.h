@@ -332,4 +332,24 @@ extern SdSpiConfig g_sd_spi_config;
 #define SD_CONFIG_CRASH g_sd_spi_config
 #endif
 
+// USB media handoff (src/ZuluSCSI_usb_handoff.h): USB access to a
+// removable-media image while SCSI emulation runs. It relies on hooks in the
+// built-in PIO SDIO driver, so it is only available where that driver is used.
+#if defined(PLATFORM_MASS_STORAGE) && defined(SD_USE_SDIO) && !defined(SD_USE_RP2350_SDIO) && !defined(PIO_FRAMEWORK_ARDUINO_NO_USB)
+#define PLATFORM_HAS_USB_MEDIA_HANDOFF 1
+
+// Register the USB storage interface with the given number of LUNs and route
+// its callbacks to the usbHandoff*() functions. Does not block.
+bool platform_msc_handoff_begin(uint8_t lun_count);
+
+// Install functions that the SD card driver calls around every operation on
+// the card. enter() returns true if leave() has to be called afterwards.
+void platform_sd_set_bus_guard(bool (*enter)(void), void (*leave)(void));
+
+// While suspended, the callback set with platform_set_sd_callback() is not
+// called. For SD card access that does not belong to the SCSI transfer the
+// callback was installed for.
+void platform_sd_callback_suspend(bool suspend);
+#endif
+
 #endif

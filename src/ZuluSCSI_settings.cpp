@@ -981,6 +981,7 @@ scsi_system_settings_t *ZuluSCSISettings::initSystem(const char *presetName, boo
     log_ini_getl("SCSI", "InitiatorImageHandling", 0, CONFIGFILE, log_settings, &log_getl_initiator_img_handling);
     log_ini_getl("SCSI", "InitiatorID", 7, CONFIGFILE, log_settings);
     log_ini_getl("SCSI", "InitiatorMaxRetry", 5, CONFIGFILE, log_settings);
+    log_ini_getbool("SCSI", "USBMediaHandoff", false, CONFIGFILE, log_settings);
     log_ini_getbool("SCSI", "InitiatorMSC", false, CONFIGFILE, log_settings);
     log_ini_getl("SCSI", "InitiatorMSCInitDelay", 0, CONFIGFILE, log_settings);
     log_ini_getl("SCSI", "InitiatorBusWidth", PLATFORM_MAX_BUS_WIDTH, CONFIGFILE, log_settings, &log_getl_bus_width);
