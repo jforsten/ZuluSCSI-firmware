@@ -30,6 +30,7 @@
 #include <stdlib.h>
 #include "ZuluSCSI_config.h"
 #include "ZuluSCSI_log.h"
+#include "ZuluSCSI_msc.h"
 #include "ZuluSCSI_disk.h"
 #include "ZuluSCSI_gap_layout.h"
 
@@ -47,6 +48,15 @@ extern bool g_sdcard_present;
 
 // A serial command line is abandoned if its characters stop arriving.
 #define HANDOFF_LINE_TIMEOUT_MS 2000
+
+// Size of the buffer that collects USB writes before they go to the SD card,
+// in sectors. 32 sectors is 16 kB, four of the 4 kB steps a USB transfer is
+// made of.
+#define HANDOFF_WB_SECTORS 32
+
+// Buffered data is written to the card at the latest this long after the
+// last USB write added to it.
+#define HANDOFF_WB_IDLE_MS 20
 
 enum handoff_request_t : uint8_t
 {
@@ -84,6 +94,20 @@ struct handoff_lun_t
     volatile uint32_t io_errors;
     uint32_t io_errors_reported;
 
+    // Buffered data could not be written to the card, after the USB host had
+    // already been told that its write succeeded. write_error_unreported is
+    // passed on to the host with its next command, write_failed to the
+    // serial side with the reply to "@give".
+    volatile bool write_error_unreported;
+    volatile bool write_failed;
+
+    // Since the last take: sectors written to the card, in how many SD card
+    // writes, and how many of those were done from a USB callback because
+    // the main loop had not got to it.
+    volatile uint32_t stat_sectors;
+    volatile uint32_t stat_writes;
+    volatile uint32_t stat_writes_callback;
+
     // Request waiting for the main loop. Written by the serial parser and by
     // the USB START STOP callback.
     volatile handoff_request_t request;
@@ -95,6 +119,25 @@ struct handoff_lun_t
 static bool g_handoff_active;
 static uint8_t g_handoff_lun_count;
 static handoff_lun_t g_handoff_luns[S2S_MAX_TARGETS];
+
+// Write-behind buffer: one run of consecutive sectors that USB has written
+// and that is not on the SD card yet. A USB write only copies into it, so
+// the next step of the transfer can start right away, and the main loop
+// writes it to the card while that step is on the wire.
+//
+// Only touched with the storage lock held: inside a USB callback, or between
+// platform_msc_lock_set(true) and (false) in the main program. The two never
+// run at the same time, see wb_flush_from_main().
+static struct
+{
+    uint8_t lun;
+    uint32_t lba;            // first buffered sector, counted from the image start
+    uint32_t count;          // buffered sectors, 0 when empty
+    uint32_t chunk;          // sectors added by the last write
+    uint32_t last_append_ms;
+} g_wb;
+
+static uint8_t g_wb_buf[HANDOFF_WB_SECTORS * HANDOFF_SECTOR_SIZE] __attribute__((aligned(4)));
 
 // Serial command line being received
 static char g_handoff_line[32];
@@ -181,6 +224,94 @@ static const char *resolve_image(image_config_t &img, uint32_t *bgn_sector, uint
 }
 
 /*****************************************/
+/* Write-behind buffer                   */
+/*****************************************/
+
+// Write the buffered sectors to the SD card. The storage lock must be held.
+// Returns false if the write failed. The data is dropped in that case and
+// the failure is remembered for the host, unless it is the host's current
+// command on reporting_lun that will fail because of it.
+static bool wb_flush(bool from_callback, uint8_t reporting_lun)
+{
+    uint32_t count = g_wb.count;
+    if (count == 0)
+    {
+        return true;
+    }
+    g_wb.count = 0;
+
+    handoff_lun_t &l = g_handoff_luns[g_wb.lun];
+    if (!l.usb_owns)
+    {
+        // Should not happen: the buffer is written or dropped before USB
+        // loses the media. Never write to an image USB does not own.
+        return true;
+    }
+
+    // A SCSI transfer of another device may have its stream callback
+    // installed. It must not be called for this write.
+    platform_sd_callback_suspend(true);
+    LED_ON();
+    bool ok = SD.card()->writeSectors(l.bgn_sector + g_wb.lba, g_wb_buf, count);
+    LED_OFF();
+    platform_sd_callback_suspend(false);
+
+    l.last_io_ms = millis();
+    l.stat_sectors += count;
+    l.stat_writes++;
+    if (from_callback)
+    {
+        l.stat_writes_callback++;
+    }
+
+    if (!ok)
+    {
+        l.io_errors++;
+        l.write_failed = true;
+        if (g_wb.lun != reporting_lun)
+        {
+            l.write_error_unreported = true;
+        }
+    }
+    return ok;
+}
+
+// The same from the main program. Taking the storage lock keeps the USB
+// timer interrupt from running a storage callback meanwhile, so the buffer
+// cannot change under the write.
+static bool wb_flush_from_main()
+{
+    if (g_wb.count == 0)
+    {
+        return true;
+    }
+
+    platform_msc_lock_set(true);
+    bool ok = wb_flush(false, 0xFF);
+    platform_msc_lock_set(false);
+    return ok;
+}
+
+// Forget buffered data of a LUN that USB is losing without a give.
+// Returns the number of sectors that were lost.
+static uint32_t wb_drop_from_main(uint8_t lun)
+{
+    if (g_wb.count == 0 || g_wb.lun != lun)
+    {
+        return 0;
+    }
+
+    platform_msc_lock_set(true);
+    uint32_t lost = (g_wb.lun == lun) ? g_wb.count : 0;
+    if (lost)
+    {
+        g_wb.count = 0;
+    }
+    platform_msc_lock_set(false);
+    return lost;
+}
+
+/*****************************************/
 /* Take, give and revoke (main program)  */
 /*****************************************/
 
@@ -210,6 +341,11 @@ static void do_take(handoff_lun_t &lun)
         lun.sector_count = count;
         lun.writable = img.file.isWritable();
         lun.last_io_ms = millis();
+        lun.write_error_unreported = false;
+        lun.write_failed = false;
+        lun.stat_sectors = 0;
+        lun.stat_writes = 0;
+        lun.stat_writes_callback = 0;
         lun.media_changed = true;
         lun.usb_owns = true;
     }
@@ -233,6 +369,32 @@ static void do_give(handoff_lun_t &lun, bool forced)
     int id = lun.scsi_id;
     image_config_t &img = scsiDiskGetImageConfig(id);
 
+    // Everything USB wrote has to be on the card before the SCSI host gets
+    // the media back.
+    wb_flush_from_main();
+
+    bool write_failed = lun.write_failed;
+    lun.write_failed = false;
+    lun.write_error_unreported = false;
+
+    if (lun.stat_writes > 0)
+    {
+        logmsg("USB media handoff: SCSI ID ", id, ", ", (int)lun.stat_sectors, " sectors written in ",
+               (int)lun.stat_writes, " SD card writes, ", (int)lun.stat_writes_callback, " of them from USB callbacks");
+        lun.stat_sectors = 0;
+        lun.stat_writes = 0;
+        lun.stat_writes_callback = 0;
+    }
+
+    if (write_failed && lun.usb_owns && lun.request_source == HANDOFF_SRC_SERIAL)
+    {
+        // Some of what USB wrote did not reach the card. The media stays
+        // with USB, so that the data can be written again. The next "@give"
+        // goes through.
+        logmsg("@ERR give id=", id, " reason=write-failed");
+        return;
+    }
+
     // USB loses the media first.
     lun.usb_owns = false;
 
@@ -246,6 +408,13 @@ static void do_give(handoff_lun_t &lun, bool forced)
     if (lun.request_source == HANDOFF_SRC_USB)
     {
         logmsg("@EVENT give id=", id, " source=usb-eject");
+    }
+
+    if (write_failed)
+    {
+        // Only reached when the USB host ejected: it has let go of the media
+        // already, so it goes back despite the failed write.
+        logmsg("@EVENT write-failed id=", id);
     }
 
     if (forced)
@@ -268,9 +437,18 @@ static void revoke_lun(handoff_lun_t &lun, const char *reason)
     lun.request_time_valid = false;
     img.usb_hold = false;
 
+    // The sectors this data was meant for no longer belong to the image USB
+    // was given, so it cannot be written anymore.
+    uint32_t lost = wb_drop_from_main((uint8_t)(&lun - g_handoff_luns));
+
     if (had_media)
     {
         logmsg("@EVENT revoke id=", (int)lun.scsi_id, " reason=", reason);
+    }
+
+    if (lost)
+    {
+        logmsg("@EVENT write-lost id=", (int)lun.scsi_id, " sectors=", (int)lost);
     }
 }
 
@@ -415,6 +593,19 @@ void usbHandoffPoll()
                 lun.request_time_valid = false;
                 do_give(lun, !quiet);
             }
+        }
+    }
+
+    // Write buffered USB data to the card once no further step fits in the
+    // buffer, or when nothing has been added for a while. The USB host is
+    // sending the next step meanwhile.
+    if (g_wb.count > 0)
+    {
+        bool full = g_wb.count + g_wb.chunk > HANDOFF_WB_SECTORS;
+        bool idle = (uint32_t)(millis() - g_wb.last_append_ms) >= HANDOFF_WB_IDLE_MS;
+        if (full || idle)
+        {
+            wb_flush_from_main();
         }
     }
 
@@ -665,6 +856,12 @@ int32_t usbHandoffRead(uint8_t lun, uint32_t lba, uint32_t offset, void *buffer,
 
     handoff_lun_t &l = g_handoff_luns[lun];
 
+    // What the host reads must include what it has just written
+    if (g_wb.count > 0 && g_wb.lun == lun && !wb_flush(true, lun))
+    {
+        return -1;
+    }
+
     // A SCSI transfer of another device may have its stream callback
     // installed. It must not be called for this transfer.
     platform_sd_callback_suspend(true);
@@ -697,24 +894,87 @@ int32_t usbHandoffWrite(uint8_t lun, uint32_t lba, uint32_t offset, const uint8_
         return -1;
     }
 
-    platform_sd_callback_suspend(true);
-    LED_ON();
-    bool ok = SD.card()->writeSectors(sd_sector, buffer, sectors);
-    LED_OFF();
-    platform_sd_callback_suspend(false);
-
-    l.last_io_ms = millis();
-    if (!ok)
+    if (l.write_error_unreported)
     {
-        l.io_errors++;
+        // An earlier write, already acknowledged, did not reach the card.
+        // Fail this one so that the host learns about it.
+        l.write_error_unreported = false;
         return -1;
     }
+
+    // The buffer holds one run of consecutive sectors. Anything that does
+    // not continue it, or does not fit, goes to the card first.
+    if (g_wb.count > 0 &&
+        (g_wb.lun != lun || lba != g_wb.lba + g_wb.count || g_wb.count + sectors > HANDOFF_WB_SECTORS))
+    {
+        if (!wb_flush(true, lun))
+        {
+            return -1;
+        }
+    }
+
+    if (sectors > HANDOFF_WB_SECTORS)
+    {
+        // Larger than the buffer: write it directly
+        platform_sd_callback_suspend(true);
+        LED_ON();
+        bool ok = SD.card()->writeSectors(sd_sector, buffer, sectors);
+        LED_OFF();
+        platform_sd_callback_suspend(false);
+
+        l.last_io_ms = millis();
+        l.stat_sectors += sectors;
+        l.stat_writes++;
+        l.stat_writes_callback++;
+        if (!ok)
+        {
+            l.io_errors++;
+            return -1;
+        }
+        return (int32_t)bufsize;
+    }
+
+    if (g_wb.count == 0)
+    {
+        g_wb.lun = lun;
+        g_wb.lba = lba;
+    }
+    memcpy(g_wb_buf + g_wb.count * HANDOFF_SECTOR_SIZE, buffer, bufsize);
+    g_wb.count += sectors;
+    g_wb.chunk = sectors;
+    g_wb.last_append_ms = millis();
+    l.last_io_ms = g_wb.last_append_ms;
     return (int32_t)bufsize;
 }
 
-void usbHandoffStartStop(uint8_t lun, bool start, bool load_eject)
+bool usbHandoffHasMedia(uint8_t lun)
 {
-    if (lun >= g_handoff_lun_count || !load_eject) return;
+    return lun < g_handoff_lun_count && g_handoff_luns[lun].usb_owns;
+}
+
+bool usbHandoffTakeWriteError(uint8_t lun)
+{
+    if (lun >= g_handoff_lun_count || !g_handoff_luns[lun].write_error_unreported)
+    {
+        return false;
+    }
+
+    g_handoff_luns[lun].write_error_unreported = false;
+    return true;
+}
+
+bool usbHandoffSync(uint8_t lun)
+{
+    if (g_wb.count > 0 && g_wb.lun == lun)
+    {
+        return wb_flush(true, lun);
+    }
+    return true;
+}
+
+bool usbHandoffStartStop(uint8_t lun, bool start, bool load_eject)
+{
+    if (lun >= g_handoff_lun_count || !load_eject) return true;
 
     handoff_lun_t &l = g_handoff_luns[lun];
     if (start)
@@ -728,12 +988,21 @@ void usbHandoffStartStop(uint8_t lun, bool start, bool load_eject)
     }
     else if (l.usb_owns)
     {
+        // What the host wrote goes to the card before it lets go of the
+        // media. If that fails the eject fails, and the media stays.
+        if (g_wb.count > 0 && g_wb.lun == lun && !wb_flush(true, lun))
+        {
+            return false;
+        }
+
         // Eject: USB stops using the media at once, the main loop gives it
         // back to the SCSI host.
         l.usb_owns = false;
         l.request_source = HANDOFF_SRC_USB;
         l.request = HANDOFF_REQ_GIVE;
     }
+
+    return true;
 }
 
 #endif // PLATFORM_HAS_USB_MEDIA_HANDOFF

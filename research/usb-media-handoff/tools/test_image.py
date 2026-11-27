@@ -17,6 +17,12 @@ Write test, on the USB drive while USB owns the media:
     test_image.py verify \\.\F: --marked   # whole image, expecting the markers
     test_image.py unmark \\.\F:            # put the original pattern back
 
+Write speed, without changing the image (every sector is rewritten with the
+pattern it already holds):
+
+    test_image.py rewrite \\.\F: --sectors 16384        # 8 MB from sector 0
+    test_image.py rewrite \\.\F: --start 50000 --sectors 4096
+
 This is not an Ensoniq disk. It only exists to test the handoff.
 """
 
@@ -84,6 +90,25 @@ def write_runs(path, marked):
     return 0
 
 
+def rewrite(path, start, sectors):
+    """Write the original pattern over a run of sectors and report the speed."""
+    import time
+    sectors = min(sectors, ZIP100_SECTORS - start)
+    begin = time.monotonic()
+    with open(path, "r+b", buffering=0) as dev:
+        dev.seek(start * SECTOR_SIZE)
+        for first in range(start, start + sectors, CHUNK_SECTORS):
+            n = min(CHUNK_SECTORS, start + sectors - first)
+            data = make_chunk(first, n)
+            if dev.write(data) != len(data):
+                print("short write at sector %d" % first)
+                return 1
+    elapsed = time.monotonic() - begin
+    print("rewrote %d sectors from %d in %.2f s = %.0f kB/s"
+          % (sectors, start, elapsed, sectors * SECTOR_SIZE / 1024 / elapsed))
+    return 0
+
+
 def create(path):
     with open(path, "wb") as out:
         for first in range(0, ZIP100_SECTORS, CHUNK_SECTORS):
@@ -120,10 +145,12 @@ def verify(path, sectors, marked=False):
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
-    parser.add_argument("command", choices=["create", "verify", "mark", "unmark"])
+    parser.add_argument("command", choices=["create", "verify", "mark", "unmark", "rewrite"])
     parser.add_argument("path")
     parser.add_argument("--sectors", type=int, default=ZIP100_SECTORS,
-                        help="verify only this many sectors from the start")
+                        help="verify or rewrite only this many sectors")
+    parser.add_argument("--start", type=int, default=0,
+                        help="rewrite: first sector (default 0)")
     parser.add_argument("--marked", action="store_true",
                         help="verify: expect the marker data written by 'mark'")
     args = parser.parse_args()
@@ -134,6 +161,8 @@ def main():
         return write_runs(args.path, True)
     if args.command == "unmark":
         return write_runs(args.path, False)
+    if args.command == "rewrite":
+        return rewrite(args.path, args.start, args.sectors)
     return verify(args.path, args.sectors, args.marked)
 
 

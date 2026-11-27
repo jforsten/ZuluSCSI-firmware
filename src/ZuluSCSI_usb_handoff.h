@@ -67,11 +67,25 @@ void usbHandoffCapacity(uint8_t lun, uint32_t *block_count, uint16_t *block_size
 bool usbHandoffWritable(uint8_t lun);
 
 // Return the number of bytes transferred, or -1 on error.
+// Writes are collected in a buffer and reach the SD card a little later:
+// when the buffer is full, when the host reads, ejects or sends SYNCHRONIZE
+// CACHE, on "@give", or after a few milliseconds without further writes.
 int32_t usbHandoffRead(uint8_t lun, uint32_t lba, uint32_t offset, void *buffer, uint32_t bufsize);
 int32_t usbHandoffWrite(uint8_t lun, uint32_t lba, uint32_t offset, const uint8_t *buffer, uint32_t bufsize);
 
-// The USB host sent START STOP UNIT.
-void usbHandoffStartStop(uint8_t lun, bool start, bool load_eject);
+// True if USB owns the media of this LUN.
+bool usbHandoffHasMedia(uint8_t lun);
+
+// True, once, if buffered data could not be written to the card after the
+// host had been told that its write succeeded.
+bool usbHandoffTakeWriteError(uint8_t lun);
+
+// Write buffered data of this LUN to the card now. False if that failed.
+bool usbHandoffSync(uint8_t lun);
+
+// The USB host sent START STOP UNIT. False if an eject could not be carried
+// out because buffered data could not be written to the card.
+bool usbHandoffStartStop(uint8_t lun, bool start, bool load_eject);
 
 #else
 

@@ -100,6 +100,11 @@ and `@give` when the SCSI host already has it both answer `@OK`.
 seconds and the firmware went ahead anyway. Treat it as a warning that data
 may not have been complete.
 
+`@give` writes everything that is still buffered in the firmware to the SD
+card before the media goes back (see "Reading and writing"). The line before
+`@OK give` in the log reports how much was written since `@take`; it is
+information only and does not start with `@`.
+
 ### Errors
 
 ```
@@ -117,6 +122,7 @@ may not have been complete.
 | `no-image` | No image is open for that ID, or it is not a removable-media type |
 | `sector-size` | The image does not use 512 byte sectors |
 | `not-contiguous` | The image file is fragmented on the SD card (or is a ROM, copy-on-write or gapped image) |
+| `write-failed` | Only for `@give`: some data written since `@take` did not reach the SD card. **The media stays with USB.** Write the data again, or send `@give` again to hand the media back as it is. |
 
 ### Unsolicited lines
 
@@ -128,6 +134,8 @@ These can arrive at any time and are not replies to a command:
 | `@EVENT take id=<id> source=usb-load` | The PC sent a load command; followed by `@OK take ...` |
 | `@EVENT revoke id=<id> reason=<r>` | The firmware took the media away from USB. Stop using the disk. Reasons: `image-changed` (another image was loaded for that ID), `images-closed`, `no-card` (SD card removed), `image-state` (the image is no longer in the state it was handed over in). Not triggered in the tests. |
 | `@EVENT io-error id=<id> count=<n>` | An SD card read or write for USB failed; `n` is the running total |
+| `@EVENT write-failed id=<id>` | The PC ejected the disk although an earlier write had not reached the SD card. The media went back anyway. |
+| `@EVENT write-lost id=<id> sectors=<n>` | Follows a revoke: `n` sectors that were written but not yet on the SD card were dropped |
 
 ### Timing
 
@@ -171,11 +179,21 @@ reports a size, or retry opening it, rather than using a fixed delay.
   given by `@OK take`. Open the device unbuffered.
 - Measured speed (USB full speed): about 750 kB/s reading with the board
   directly on the PC; hubs in between cost some of that. Writing is about
-  540 kB/s.
+  660 kB/s.
   Write only the sectors that changed.
 - Before giving the media back: flush (`FlushFileBuffers` / `fsync`) and
   **close the device**. Nothing the operating system still holds reaches the
   card after `@give`.
+- **Writes are buffered in the firmware.** A write is acknowledged to the PC
+  when it is in the firmware's 16 kB buffer, and reaches the SD card up to
+  20 ms later. `@give`, an eject, a read from the drive and the SCSI command
+  SYNCHRONIZE CACHE all write the buffer out first, so the sequence in this
+  document needs no extra step. What it changes:
+  - If the SD card rejects the data, the write that carried it has already
+    succeeded. The failure shows up on a **later** write (it fails with an
+    I/O error) or as `@ERR give ... reason=write-failed`. A tool must treat
+    either as "data written since `@take` may be incomplete".
+  - Do not cut power to the board right after a write. Send `@give` first.
 
 ### Eject from the PC
 
@@ -195,6 +213,9 @@ should use `@give` and not rely on eject.
 5. Read and write sectors.
 6. Flush and close the disk.
 7. Send `@give`. Wait for `@OK give`. If the reply has `forced=1`, warn.
+   On `@ERR give ... reason=write-failed` the media is still with USB: go
+   back to step 4 and write the data again, or report the failure and send
+   `@give` once more.
 8. Close the serial port.
 
 If `@EVENT revoke` arrives during steps 4 to 6, or a read or write fails,

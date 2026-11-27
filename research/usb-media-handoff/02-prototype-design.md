@@ -134,6 +134,37 @@ make that safe; both are inactive unless the handoff is enabled:
 Each SD operation is self-contained in this driver (multi-block transfers are
 stopped before the call returns), so interleaving whole operations is safe.
 
+### Buffered writes
+
+A USB write does not go to the SD card directly. It is copied into a 16 kB
+buffer (`g_wb` in `ZuluSCSI_usb_handoff.cpp`) and acknowledged, and the
+buffer is written to the card:
+
+- by the main loop, when no further 4 kB step fits or nothing has been added
+  for 20 ms;
+- inside the USB callback, when a write does not continue the buffered run,
+  when the host reads from that drive, ejects it or sends SYNCHRONIZE CACHE;
+- by `@give`, before the media goes back.
+
+The buffer is only touched with the storage lock held: inside a USB callback,
+or in the main program between `platform_msc_lock_set(true)` and `(false)`.
+That lock holds `USB.mutex`, so the timer interrupt cannot run a storage
+callback during a main-loop write, and the buffer cannot change under it.
+
+Consequences:
+
+- The host is told a write succeeded before the data is on the card. If the
+  card write then fails, the data is dropped and the failure is reported
+  late: the host's next write or TEST UNIT READY on that drive fails
+  (MEDIUM ERROR, write error), `@EVENT io-error` is logged, and the next
+  `@give` answers `@ERR give ... reason=write-failed` and leaves the media
+  with USB so it can be written again. An eject from the host fails instead
+  if its flush fails.
+- If the handoff is revoked, buffered data is lost
+  (`@EVENT write-lost id=<id> sectors=<n>`).
+- These failure paths are implemented but could not be exercised: no card
+  write failed during the tests.
+
 ### What the SCSI side notices
 
 - A USB read or write blocks the main loop for the duration of one SD
@@ -166,18 +197,38 @@ Sequential read of 8 MB, Windows 11, 64 kB requests:
 With the serial port open the firmware's own serial polling also runs
 `tud_task()`, which is why that column was already faster.
 
-Writing stayed at about 540 kB/s on both builds (about 1 MB written in
-five runs, so a rough figure). The wait for the timer tick is therefore not
-what limits writes. The likely limit is the SD card write done for every
-4 kB step, which has not been measured separately.
+Writing was limited by the SD card write that followed every 4 kB step.
+With the write buffer (see "Buffered writes") the card write happens in the
+main loop while the host is already sending the next step.
+
+Sequential write of 8 MB, same setup, board directly on the PC
+(`tools/test_image.py rewrite`, which writes the data that is already there):
+
+| Firmware | Serial port closed | Serial port open |
+|---|---|---|
+| `a003760` (card write in every step) | 521 kB/s | 498 kB/s |
+| with the write buffer | 662 kB/s | 615 kB/s |
+
+A temporary build with an adjustable threshold gave 662 to 665 kB/s whether
+the buffer was written after 4, 8, 12 or 16 kB. The card write is therefore
+fully hidden and the USB transfer itself is the limit now: about 6.2 ms per
+4 kB step going out, against about 5.4 ms coming in. The firmware counts its
+card writes: 16,384 sectors went out in 512 writes of 16 kB, none of them
+from inside a USB callback.
+
+The earlier, rougher write figure of about 540 kB/s came from the 1 MB
+marker test.
 
 What is left, not done:
 
-- The open-port figure is still a little higher, so calling the task from
-  more places in the main loop would gain a few percent.
-- Doing the SD card access for the next step while the current one is on the
-  wire (read-ahead, batched writes). Not measured.
+- The open-port figure for reads is still a little higher, so calling the
+  task from more places in the main loop would gain a few percent. For
+  writes an open serial port costs a little.
+- Reading the next step from the card while the current one is on the wire
+  (read-ahead). Not measured.
 - A larger step size needs a rebuilt framework library.
+- The remaining gap for writes is in the USB device driver (how fast it
+  takes packets from the host), not in this code.
 - Hubs between the board and the PC cost about 14% once the firmware is no
   longer the limit.
 
@@ -185,7 +236,7 @@ What is left, not done:
 
 | File | Change |
 |---|---|
-| `src/ZuluSCSI_usb_handoff.{h,cpp}` | New. State, take/give/revoke, USB callback backends, serial command parser. |
+| `src/ZuluSCSI_usb_handoff.{h,cpp}` | New. State, take/give/revoke, USB callback backends, write buffer, serial command parser. |
 | `src/ZuluSCSI.cpp` | Start the handoff after images are opened; poll at bus free; revoke on card removal. |
 | `src/ZuluSCSI_disk.{h,cpp}` | `usb_hold` flag; guard in `scsiDiskCloseTray()`; revoke hooks. |
 | `src/ZuluSCSI_settings.cpp`, `zuluscsi.ini` | `USBMediaHandoff` setting. |
@@ -206,11 +257,15 @@ What is left, not done:
 - `@take` during a mounted, in-use disk on the SCSI host is the same as
   pulling a Zip disk out. The host should not be loading or saving.
 - USB is full-speed (12 Mbit/s), so about 1 MB/s is the ceiling. Measured:
-  about 755 kB/s reading. See "Transfer speed" below.
+  about 755 kB/s reading and 660 kB/s writing. See "Transfer speed" above.
 - The handoff module is also linked into the bootloader image, because the
-  USB storage callbacks reference it. It adds about 7 KB there; the bootloader
-  is 124,448 bytes of its 131,072 byte limit with this change. If that
-  headroom is needed, the module has to be kept out of the bootloader link.
+  USB storage callbacks reference it. It adds about 8 kB there; the bootloader
+  is 125,088 bytes of its 131,072 byte limit. If that headroom is needed, the
+  module has to be kept out of the bootloader link.
+- The write buffer takes 16 kB of RAM whether the feature is enabled or not
+  (static RAM use 203,948 of 270,336 bytes on `ZuluSCSI_RP2040`).
+- Up to 16 kB of written data is only in RAM for up to 20 ms. It is lost if
+  the board loses power in that time.
 
 ## Test plan
 
@@ -319,5 +374,21 @@ against that pattern. It is not an Ensoniq disk.
   505 kB/s with it open (two-second samples), so unchanged from the first
   build: the faster servicing does not help writes.
 - "Eject" in Windows again produced `@EVENT give id=0 source=usb-eject`.
+
+2026-11-28, firmware with the write buffer (built 01:30):
+
+- Installed through the USB bootloader. Boots, `@status`, `@take`, `@give`
+  work as before.
+- Write test: markers written, part of them read back at once (the read has
+  to see buffered data), markers written again and `@give` sent right away
+  (the give has to flush); a full read after `@take` showed the markers in
+  exactly the right sectors and everything else unchanged.
+- Pattern restored and the drive ejected from Windows right away (the eject
+  has to flush); a full read after `@take` matched the original image.
+- 8 MB written twice at 659 and 667 kB/s; the written regions verified after
+  a give/take cycle. Full read at 754 kB/s.
+- `@status` answered in about 0.3 s while a USB write was running.
+- No `io-error`, `write-failed`, `write-lost` or `revoke` events.
+- Not exercised: the write failure paths, since no card write failed.
 
 Update this section as steps are verified.

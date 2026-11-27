@@ -406,7 +406,12 @@ extern "C" bool tud_msc_start_stop_cb(uint8_t lun, uint8_t power_condition, bool
 #ifdef PLATFORM_HAS_USB_MEDIA_HANDOFF
   if (g_msc_handoff)
   {
-    usbHandoffStartStop(lun, start, load_eject);
+    if (!usbHandoffStartStop(lun, start, load_eject))
+    {
+      // MEDIUM ERROR, write error: data from before the eject is not on the card
+      tud_msc_set_sense(lun, SCSI_SENSE_MEDIUM_ERROR, 0x0C, 0x00);
+      return false;
+    }
     return true;
   }
 #endif
@@ -446,6 +451,14 @@ extern "C" bool tud_msc_test_unit_ready_cb(uint8_t lun)
       return false;
     }
 
+    if (ready && usbHandoffTakeWriteError(lun))
+    {
+      // A write that was already acknowledged did not reach the card.
+      // MEDIUM ERROR, write error
+      tud_msc_set_sense(lun, SCSI_SENSE_MEDIUM_ERROR, 0x0C, 0x00);
+      return false;
+    }
+
     // If not ready, TinyUSB reports NOT READY, medium not present
     return ready;
   }
@@ -481,6 +494,28 @@ extern "C" int32_t tud_msc_scsi_cb(uint8_t lun, const uint8_t scsi_cmd[16], void
 {
   MSCScopedLock lock;
   if (g_msc_initiator) return init_msc_scsi_cb(lun, scsi_cmd, buffer, bufsize);
+
+#ifdef PLATFORM_HAS_USB_MEDIA_HANDOFF
+  if (g_msc_handoff && scsi_cmd[0] == 0x35)
+  {
+    // SYNCHRONIZE CACHE (10): write buffered data to the card
+    if (!usbHandoffHasMedia(lun))
+    {
+      // NOT READY, medium not present
+      tud_msc_set_sense(lun, SCSI_SENSE_NOT_READY, 0x3A, 0x00);
+      return -1;
+    }
+
+    if (!usbHandoffSync(lun))
+    {
+      // MEDIUM ERROR, write error
+      tud_msc_set_sense(lun, SCSI_SENSE_MEDIUM_ERROR, 0x0C, 0x00);
+      return -1;
+    }
+
+    return 0;
+  }
+#endif
 
   const void *response = NULL;
   uint16_t resplen = 0;
