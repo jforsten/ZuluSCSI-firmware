@@ -302,6 +302,23 @@ bool platform_msc_handoff_begin(uint8_t lun_count)
   msc_usb_register();
   return true;
 }
+
+void platform_msc_handoff_task()
+{
+  // Not from inside a storage callback or an SD card operation
+  if (!g_msc_handoff || g_msc_lock || g_msc_sd_busy)
+  {
+    return;
+  }
+
+  // Same arrangement as the USB core's serial functions: holding the mutex
+  // keeps the timer interrupt from running tud_task() at the same time.
+  if (mutex_try_enter(&USB.mutex, NULL))
+  {
+    tud_task();
+    mutex_exit(&USB.mutex);
+  }
+}
 #endif
 
 /* perform any cleanup tasks for the MSC-specific functionality */

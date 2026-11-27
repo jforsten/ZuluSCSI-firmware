@@ -54,8 +54,9 @@ understand the commands below.
   [36101ms] @OK status luns=1
   ```
 
-  To parse: split the stream into lines, find the first `@` in each line, and
-  ignore lines without one.
+  To parse: split the stream into lines, strip the `[<n>ms] ` prefix, and keep
+  only lines whose remaining text starts with `@`. Other log lines can contain
+  an `@` further in (the start-up message lists the commands, for example).
 - Before sending a command, discard input that is already waiting.
 
 ### Sending a command
@@ -168,8 +169,10 @@ reports a size, or retry opening it, rather than using a fixed delay.
 
 - Whole 512 byte sectors only, at sector-aligned offsets, inside the size
   given by `@OK take`. Open the device unbuffered.
-- Measured speed: about 650 kB/s reading, about 540 kB/s writing (USB full
-  speed). Write only the sectors that changed.
+- Measured speed (USB full speed): about 750 kB/s reading with the board
+  directly on the PC; hubs in between cost some of that. Writing was about
+  540 kB/s on the first prototype build and has not been measured since.
+  Write only the sectors that changed.
 - Before giving the media back: flush (`FlushFileBuffers` / `fsync`) and
   **close the device**. Nothing the operating system still holds reaches the
   card after `@give`.

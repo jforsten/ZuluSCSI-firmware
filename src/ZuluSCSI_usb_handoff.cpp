@@ -356,10 +356,17 @@ void usbHandoffPoll()
 {
     if (!g_handoff_active) return;
 
+    bool usb_has_media = false;
+
     for (int i = 0; i < g_handoff_lun_count; i++)
     {
         handoff_lun_t &lun = g_handoff_luns[i];
         image_config_t &img = scsiDiskGetImageConfig(lun.scsi_id);
+
+        if (lun.usb_owns)
+        {
+            usb_has_media = true;
+        }
 
         // The image USB owns must still be the ejected, held image it was
         // given. Anything else means some code path changed it without going
@@ -409,6 +416,16 @@ void usbHandoffPoll()
                 do_give(lun, !quiet);
             }
         }
+    }
+
+    // A storage transfer is a chain of 4 kB steps, each started by the USB
+    // stack when the previous one has finished. Run the stack on every pass
+    // while a transfer is possible, so that a step does not sit waiting for
+    // the once-per-millisecond timer. Only while USB has media: the SCSI
+    // side keeps its usual timing the rest of the time.
+    if (usb_has_media)
+    {
+        platform_msc_handoff_task();
     }
 }
 

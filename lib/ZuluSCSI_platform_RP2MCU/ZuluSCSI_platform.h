@@ -342,6 +342,11 @@ extern SdSpiConfig g_sd_spi_config;
 // its callbacks to the usbHandoff*() functions. Does not block.
 bool platform_msc_handoff_begin(uint8_t lun_count);
 
+// Let the USB stack handle whatever is waiting, now, from the main program.
+// Without this it only runs from a timer once per millisecond, and every
+// chunk of a storage transfer waits for the next tick.
+void platform_msc_handoff_task();
+
 // Install functions that the SD card driver calls around every operation on
 // the card. enter() returns true if leave() has to be called afterwards.
 void platform_sd_set_bus_guard(bool (*enter)(void), void (*leave)(void));

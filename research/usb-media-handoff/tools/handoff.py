@@ -13,10 +13,14 @@ Needs pyserial (pip install pyserial).
 """
 
 import argparse
+import re
 import sys
 import time
 
 import serial
+
+# A log line whose message starts with '@': time prefix, then the reply
+REPLY_LINE = re.compile(r"^\[\d+ms\] (@.*)$")
 
 
 def read_reply(port, command, timeout):
@@ -33,11 +37,13 @@ def read_reply(port, command, timeout):
             raw, buffer = buffer.split(b"\n", 1)
             text = raw.decode("ascii", errors="replace").strip()
 
-            # Replies come through the firmware log: "[1234ms] @OK take id=5"
-            at = text.find("@")
-            if at < 0:
+            # Replies come through the firmware log: "[1234ms] @OK take id=5".
+            # Other log lines can contain an '@' further in, so only lines
+            # whose message starts with it count.
+            match = REPLY_LINE.match(text)
+            if not match:
                 continue
-            reply = text[at:]
+            reply = match.group(1)
             lines.append(reply)
             if reply.startswith("@OK " + command) or reply.startswith("@ERR"):
                 return lines

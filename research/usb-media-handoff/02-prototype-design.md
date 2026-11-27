@@ -142,6 +142,40 @@ stopped before the call returns), so interleaving whole operations is safe.
 - While any SD operation runs, USB is not serviced. During long uninterrupted
   SD activity USB slows down but is not starved, because operations are short.
 
+## Transfer speed
+
+A storage transfer runs in 4 kB steps (`CFG_TUD_MSC_EP_BUFSIZE`, fixed in the
+precompiled framework library). Each step is started by `tud_task()` once the
+previous one has finished, and does its SD card access before (read) or after
+(write) the USB part, not at the same time.
+
+The USB core calls `tud_task()` from a timer once per millisecond, so each
+step waited up to a millisecond for the next tick. `usbHandoffPoll()` now
+calls `platform_msc_handoff_task()` on every main-loop pass while USB has
+the media, which runs `tud_task()` directly. It is not called while the SCSI
+side has the media, so the SCSI path keeps its timing.
+
+Sequential read of 8 MB, Windows 11, 64 kB requests:
+
+| Firmware | Connection | Serial port closed | Serial port open |
+|---|---|---|---|
+| `a0a0d24` (timer only) | through two USB 2.0 hubs | 640 kB/s | 686 kB/s |
+| `a0a0d24` (timer only) | directly on the PC | 650 kB/s | 798 kB/s |
+| with `platform_msc_handoff_task()` | directly on the PC | 756 kB/s | 798 kB/s |
+
+With the serial port open the firmware's own serial polling also runs
+`tud_task()`, which is why that column was already faster.
+
+What is left, not done:
+
+- The open-port figure is still a little higher, so calling the task from
+  more places in the main loop would gain a few percent.
+- Doing the SD card access for the next step while the current one is on the
+  wire (read-ahead, batched writes). Not measured.
+- A larger step size needs a rebuilt framework library.
+- Hubs between the board and the PC cost about 14% once the firmware is no
+  longer the limit.
+
 ## Files touched
 
 | File | Change |
@@ -166,7 +200,8 @@ stopped before the call returns), so interleaving whole operations is safe.
   removes the media regardless.
 - `@take` during a mounted, in-use disk on the SCSI host is the same as
   pulling a Zip disk out. The host should not be loading or saving.
-- USB speed is full-speed, about 1 MB/s.
+- USB is full-speed (12 Mbit/s), so about 1 MB/s is the ceiling. Measured:
+  about 755 kB/s reading. See "Transfer speed" below.
 - The handoff module is also linked into the bootloader image, because the
   USB storage callbacks reference it. It adds about 7 KB there; the bootloader
   is 124,448 bytes of its 131,072 byte limit with this change. If that
@@ -262,5 +297,18 @@ against that pattern. It is not an Ensoniq disk.
 - Not tested yet: pulling the SD card (7),
   everything with a SCSI host (8 to 11), fragmented images, more than one
   LUN, other operating systems.
+
+2026-11-28, firmware with `platform_msc_handoff_task()`:
+
+- Installed through the USB bootloader (`u`, `y` on the serial console, then
+  the `.uf2`). This also replaced the 2023 bootloader with the one from this
+  build. The board boots and reports `git:a0a0d24-dirty`, built 00:58.
+- `@status`, `@take`, `@give` work as before.
+- Whole image read over USB matches the pattern, at 751 kB/s.
+- Read speed figures are in "Transfer speed" above.
+- `@status` answered in about 0.3 s while a USB read was running.
+- No `io-error` or `revoke` events in the log.
+- Not repeated with this build: the write test, eject from Windows. Write
+  speed was not measured again.
 
 Update this section as steps are verified.
