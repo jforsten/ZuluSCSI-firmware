@@ -170,8 +170,8 @@ reports a size, or retry opening it, rather than using a fixed delay.
 - Whole 512 byte sectors only, at sector-aligned offsets, inside the size
   given by `@OK take`. Open the device unbuffered.
 - Measured speed (USB full speed): about 750 kB/s reading with the board
-  directly on the PC; hubs in between cost some of that. Writing was about
-  540 kB/s on the first prototype build and has not been measured since.
+  directly on the PC; hubs in between cost some of that. Writing is about
+  540 kB/s.
   Write only the sectors that changed.
 - Before giving the media back: flush (`FlushFileBuffers` / `fsync`) and
   **close the device**. Nothing the operating system still holds reaches the

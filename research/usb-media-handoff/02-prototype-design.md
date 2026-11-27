@@ -166,6 +166,11 @@ Sequential read of 8 MB, Windows 11, 64 kB requests:
 With the serial port open the firmware's own serial polling also runs
 `tud_task()`, which is why that column was already faster.
 
+Writing stayed at about 540 kB/s on both builds (about 1 MB written in
+five runs, so a rough figure). The wait for the timer tick is therefore not
+what limits writes. The likely limit is the SD card write done for every
+4 kB step, which has not been measured separately.
+
 What is left, not done:
 
 - The open-port figure is still a little higher, so calling the task from
@@ -308,7 +313,11 @@ against that pattern. It is not an Ensoniq disk.
 - Read speed figures are in "Transfer speed" above.
 - `@status` answered in about 0.3 s while a USB read was running.
 - No `io-error` or `revoke` events in the log.
-- Not repeated with this build: the write test, eject from Windows. Write
-  speed was not measured again.
+- Write test repeated (same 2,068 sectors as test plan 5): markers verified
+  by a full read after a give/take cycle, pattern restored and verified by
+  another full read. Write speed 538 kB/s with the serial port closed and
+  505 kB/s with it open (two-second samples), so unchanged from the first
+  build: the faster servicing does not help writes.
+- "Eject" in Windows again produced `@EVENT give id=0 source=usb-eject`.
 
 Update this section as steps are verified.
