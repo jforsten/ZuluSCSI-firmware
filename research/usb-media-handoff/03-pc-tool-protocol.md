@@ -152,7 +152,7 @@ These can arrive at any time and are not replies to a command:
 
 | Media owner | What the PC sees |
 |---|---|
-| SCSI | Removable disk without media. Opening it or reading fails ("not ready"). |
+| SCSI | Removable disk without media. Reading fails ("not ready"). On Windows the volume can still be opened; its length is then reported as 0. |
 | USB | Disk with media, 512 byte sectors, `sectors` from the `@OK take` reply. |
 
 After `@OK take` the operating system needs a moment to notice the media. In
@@ -242,7 +242,15 @@ that time.
 - [tools/handoff.py](tools/handoff.py): sends one command and waits for the
   reply, with the line parsing described above.
 - [tools/test_image.py](tools/test_image.py): raw sector reads and writes on
-  the disk (`verify`, `mark`, `unmark`), used for the bench tests.
+  the disk (`verify`, `mark`, `unmark`), used for the bench tests, and a
+  read-only checksum (`hash`) that works on any image.
+- [tools/find_device.py](tools/find_device.py): finds the serial port and the
+  drive letter of a board on Windows.
+- [tools/handoff_console.py](tools/handoff_console.py): keeps the serial port
+  open, records the log to a file and sends commands; for test sessions.
+
+What a disk tool has to build on top of this protocol is described in
+[04-app-integration.md](04-app-integration.md).
 
 Example session on Windows, as run in the tests:
 

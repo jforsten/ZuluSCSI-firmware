@@ -23,7 +23,14 @@ pattern it already holds):
     test_image.py rewrite \\.\F: --sectors 16384        # 8 MB from sector 0
     test_image.py rewrite \\.\F: --start 50000 --sectors 4096
 
-This is not an Ensoniq disk. It only exists to test the handoff.
+Checksum of any disk or image, read-only, for before/after comparisons. Works
+on a real (for example Ensoniq) image too:
+
+    test_image.py hash \.\F: --sectors 196608       # sector count from "@OK take"
+
+This is not an Ensoniq disk. It only exists to test the handoff. "mark",
+"unmark" and "rewrite" write the test pattern and destroy any other content;
+never run them on a real image.
 """
 
 import argparse
@@ -143,12 +150,30 @@ def verify(path, sectors, marked=False):
     return 1 if bad else 0
 
 
+def sha256(path, sectors):
+    """Print the SHA-256 of the first 'sectors' sectors. Reads only."""
+    import hashlib
+    import time
+    digest = hashlib.sha256()
+    begin = time.monotonic()
+    with open(path, "rb", buffering=0) as src:
+        for first in range(0, sectors, CHUNK_SECTORS):
+            count = min(CHUNK_SECTORS, sectors - first)
+            data = src.read(count * SECTOR_SIZE)
+            if len(data) != count * SECTOR_SIZE:
+                print("short read at sector %d: got %d bytes" % (first, len(data)))
+                return 1
+            digest.update(data)
+    print("sha256 of %d sectors: %s (%.0f s)" % (sectors, digest.hexdigest(), time.monotonic() - begin))
+    return 0
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
-    parser.add_argument("command", choices=["create", "verify", "mark", "unmark", "rewrite"])
+    parser.add_argument("command", choices=["create", "verify", "hash", "mark", "unmark", "rewrite"])
     parser.add_argument("path")
     parser.add_argument("--sectors", type=int, default=ZIP100_SECTORS,
-                        help="verify or rewrite only this many sectors")
+                        help="verify, hash or rewrite only this many sectors")
     parser.add_argument("--start", type=int, default=0,
                         help="rewrite: first sector (default 0)")
     parser.add_argument("--marked", action="store_true",
@@ -161,6 +186,8 @@ def main():
         return write_runs(args.path, True)
     if args.command == "unmark":
         return write_runs(args.path, False)
+    if args.command == "hash":
+        return sha256(args.path, args.sectors)
     if args.command == "rewrite":
         return rewrite(args.path, args.start, args.sectors)
     return verify(args.path, args.sectors, args.marked)
