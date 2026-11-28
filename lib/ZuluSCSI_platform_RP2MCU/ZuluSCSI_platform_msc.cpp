@@ -30,6 +30,7 @@
 #include "ZuluSCSI_log.h"
 #include "ZuluSCSI_msc.h"
 #include "ZuluSCSI_msc_initiator.h"
+#include "ZuluSCSI_usb_handoff.h"
 #include "ZuluSCSI_config.h"
 #include "ZuluSCSI_settings.h"
 #include <device/usbd.h>
@@ -53,6 +54,14 @@ extern image_config_t g_DiskImages[S2S_MAX_TARGETS];
 
 static bool g_msc_lock; // To block re-entrant calls
 static bool g_msc_usb_mutex_held;
+
+#ifdef PLATFORM_HAS_USB_MEDIA_HANDOFF
+// Storage callbacks are served by the USB media handoff while SCSI emulation runs
+static bool g_msc_handoff;
+
+// The main program is in the middle of an SD card operation and holds USB.mutex
+static volatile bool g_msc_sd_busy;
+#endif
 
 /* globals */
 static struct {
@@ -102,6 +111,12 @@ void platform_msc_lock_set(bool block)
 
 bool platform_msc_lock_get()
 {
+#ifdef PLATFORM_HAS_USB_MEDIA_HANDOFF
+  // Serial calls made from inside an SD card operation would be refused by
+  // the USB core because the mutex is taken. Have the callers skip them.
+  if (g_msc_sd_busy) return true;
+#endif
+
   return g_msc_lock;
 }
 
@@ -179,6 +194,32 @@ bool msc_image_eligble(uint8_t t) {
   } 
 }
 
+/* add the mass storage interface to the USB device, if not there yet */
+static void msc_usb_register() {
+  if (!g_MSC.usbRegistered)
+  {
+    USB.disconnect();
+    g_MSC.usbEpIn = USB.registerEndpointIn();
+    g_MSC.usbEpOut = USB.registerEndpointOut();
+    static uint8_t msd_desc[] = { TUD_MSC_DESCRIPTOR(1 /* placeholder */, 0, g_MSC.usbEpOut, g_MSC.usbEpIn, USBD_MSC_EPSIZE) };
+    g_MSC.usbId = USB.registerInterface(1, USBClass::simpleInterface, msd_desc, sizeof(msd_desc), 2, 0);
+    USB.connect();
+    g_MSC.usbRegistered = true;
+  }
+
+  if (g_MSC.lun_count_prev_response != 0 &&
+      g_MSC.lun_count != g_MSC.lun_count_prev_response)
+  {
+    // Host has already queried us for the number of LUNs, but
+    // our response has now changed. We need to re-enumerate to
+    // update it.
+    g_MSC.lun_count_prev_response = 0;
+    USB.disconnect();
+    delay(250);
+    USB.connect();
+  }
+}
+
 /* perform MSC class preinit tasks */
 void platform_enter_msc() {
   dbgmsg("USB MSC buffer size: ", CFG_TUD_MSC_EP_BUFSIZE);
@@ -216,29 +257,69 @@ void platform_enter_msc() {
 
   // MSC is ready for read/write
   g_MSC.unitReady = g_MSC.lun_count;
-  if (!g_MSC.usbRegistered)
+  msc_usb_register();
+}
+
+#ifdef PLATFORM_HAS_USB_MEDIA_HANDOFF
+/* SD card bus guard for the USB media handoff.
+   USB.mutex is held while the main program runs an SD card operation. The USB
+   timer interrupt then skips its tud_task() call, so a storage callback cannot
+   start an SD card access of its own in the middle of that operation. */
+static bool handoff_sd_guard_enter()
+{
+  if (!mutex_try_enter(&USB.mutex, NULL))
   {
-    USB.disconnect();
-    g_MSC.usbEpIn = USB.registerEndpointIn();
-    g_MSC.usbEpOut = USB.registerEndpointOut();
-    static uint8_t msd_desc[] = { TUD_MSC_DESCRIPTOR(1 /* placeholder */, 0, g_MSC.usbEpOut, g_MSC.usbEpIn, USBD_MSC_EPSIZE) };
-    g_MSC.usbId = USB.registerInterface(1, USBClass::simpleInterface, msd_desc, sizeof(msd_desc), 2, 0);
-    USB.connect();
-    g_MSC.usbRegistered = true;
+    // Already inside the USB stack (a storage callback doing its SD card
+    // access) or inside another SD card operation.
+    return false;
   }
 
-  if (g_MSC.lun_count_prev_response != 0 &&
-      g_MSC.lun_count != g_MSC.lun_count_prev_response)
+  g_msc_sd_busy = true;
+  return true;
+}
+
+static void handoff_sd_guard_leave()
+{
+  g_msc_sd_busy = false;
+  mutex_exit(&USB.mutex);
+}
+
+bool platform_msc_handoff_begin(uint8_t lun_count)
+{
+  if (lun_count == 0 || lun_count > S2S_MAX_TARGETS)
   {
-    // Host has already queried us for the number of LUNs, but
-    // our response has now changed. We need to re-enumerate to
-    // update it.
-    g_MSC.lun_count_prev_response = 0;
-    USB.disconnect();
-    delay(250);
-    USB.connect();
+    return false;
+  }
+
+  g_MSC.SDMode = 0;
+  g_MSC.lun_count = lun_count;
+  g_MSC.unitReady = lun_count;
+
+  // Both have to be in place before the host can send the first command
+  platform_sd_set_bus_guard(&handoff_sd_guard_enter, &handoff_sd_guard_leave);
+  g_msc_handoff = true;
+
+  msc_usb_register();
+  return true;
+}
+
+void platform_msc_handoff_task()
+{
+  // Not from inside a storage callback or an SD card operation
+  if (!g_msc_handoff || g_msc_lock || g_msc_sd_busy)
+  {
+    return;
+  }
+
+  // Same arrangement as the USB core's serial functions: holding the mutex
+  // keeps the timer interrupt from running tud_task() at the same time.
+  if (mutex_try_enter(&USB.mutex, NULL))
+  {
+    tud_task();
+    mutex_exit(&USB.mutex);
   }
 }
+#endif
 
 /* perform any cleanup tasks for the MSC-specific functionality */
 void platform_exit_msc() {
@@ -307,6 +388,9 @@ extern "C" bool tud_msc_is_writable_cb (uint8_t lun)
 {
   MSCScopedLock lock;
   if (g_msc_initiator) return init_msc_is_writable_cb(lun);
+#ifdef PLATFORM_HAS_USB_MEDIA_HANDOFF
+  if (g_msc_handoff) return usbHandoffWritable(lun);
+#endif
   if (g_MSC.SDMode) return g_MSC.unitReady;
   
   (void) lun;
@@ -318,6 +402,19 @@ extern "C" bool tud_msc_start_stop_cb(uint8_t lun, uint8_t power_condition, bool
 {
   MSCScopedLock lock;
   if (g_msc_initiator) return init_msc_start_stop_cb(lun, power_condition, start, load_eject);
+
+#ifdef PLATFORM_HAS_USB_MEDIA_HANDOFF
+  if (g_msc_handoff)
+  {
+    if (!usbHandoffStartStop(lun, start, load_eject))
+    {
+      // MEDIUM ERROR, write error: data from before the eject is not on the card
+      tud_msc_set_sense(lun, SCSI_SENSE_MEDIUM_ERROR, 0x0C, 0x00);
+      return false;
+    }
+    return true;
+  }
+#endif
 
   if (load_eject)  {
     if (start) {
@@ -340,6 +437,33 @@ extern "C" bool tud_msc_test_unit_ready_cb(uint8_t lun)
   MSCScopedLock lock;
   if (g_msc_initiator) return init_msc_test_unit_ready_cb(lun);
 
+#ifdef PLATFORM_HAS_USB_MEDIA_HANDOFF
+  if (g_msc_handoff)
+  {
+    bool media_changed = false;
+    bool ready = usbHandoffUnitReady(lun, &media_changed);
+    if (media_changed)
+    {
+      // Report once that new media arrived, so that the host drops what it
+      // remembers about the previous one.
+      // UNIT ATTENTION, not ready to ready change, medium may have changed
+      tud_msc_set_sense(lun, SCSI_SENSE_UNIT_ATTENTION, 0x28, 0x00);
+      return false;
+    }
+
+    if (ready && usbHandoffTakeWriteError(lun))
+    {
+      // A write that was already acknowledged did not reach the card.
+      // MEDIUM ERROR, write error
+      tud_msc_set_sense(lun, SCSI_SENSE_MEDIUM_ERROR, 0x0C, 0x00);
+      return false;
+    }
+
+    // If not ready, TinyUSB reports NOT READY, medium not present
+    return ready;
+  }
+#endif
+
   return g_MSC.unitReady && g_MSC.lun_unitReady[lun];
 }
 
@@ -349,6 +473,10 @@ extern "C" void tud_msc_capacity_cb(uint8_t lun, uint32_t *block_count,
 {
   MSCScopedLock lock;
   if (g_msc_initiator) return init_msc_capacity_cb(lun, block_count, block_size);
+
+#ifdef PLATFORM_HAS_USB_MEDIA_HANDOFF
+  if (g_msc_handoff) return usbHandoffCapacity(lun, block_count, block_size);
+#endif
 
   if (g_MSC.SDMode) {
     *block_count = g_MSC.unitReady ? (SD.card()->sectorCount()) : 0;
@@ -366,6 +494,28 @@ extern "C" int32_t tud_msc_scsi_cb(uint8_t lun, const uint8_t scsi_cmd[16], void
 {
   MSCScopedLock lock;
   if (g_msc_initiator) return init_msc_scsi_cb(lun, scsi_cmd, buffer, bufsize);
+
+#ifdef PLATFORM_HAS_USB_MEDIA_HANDOFF
+  if (g_msc_handoff && scsi_cmd[0] == 0x35)
+  {
+    // SYNCHRONIZE CACHE (10): write buffered data to the card
+    if (!usbHandoffHasMedia(lun))
+    {
+      // NOT READY, medium not present
+      tud_msc_set_sense(lun, SCSI_SENSE_NOT_READY, 0x3A, 0x00);
+      return -1;
+    }
+
+    if (!usbHandoffSync(lun))
+    {
+      // MEDIUM ERROR, write error
+      tud_msc_set_sense(lun, SCSI_SENSE_MEDIUM_ERROR, 0x0C, 0x00);
+      return -1;
+    }
+
+    return 0;
+  }
+#endif
 
   const void *response = NULL;
   uint16_t resplen = 0;
@@ -406,6 +556,10 @@ extern "C" int32_t tud_msc_read10_cb(uint8_t lun, uint32_t lba, uint32_t offset,
   MSCScopedLock lock;
   if (g_msc_initiator) return init_msc_read10_cb(lun, lba, offset, buffer, bufsize);
 
+#ifdef PLATFORM_HAS_USB_MEDIA_HANDOFF
+  if (g_msc_handoff) return usbHandoffRead(lun, lba, offset, buffer, bufsize);
+#endif
+
   bool rc = 0;
 
   if (g_MSC.SDMode) {
@@ -433,6 +587,10 @@ extern "C" int32_t tud_msc_write10_cb(uint8_t lun, uint32_t lba, uint32_t offset
 {
   MSCScopedLock lock;
   if (g_msc_initiator) return init_msc_write10_cb(lun, lba, offset, buffer, bufsize);
+
+#ifdef PLATFORM_HAS_USB_MEDIA_HANDOFF
+  if (g_msc_handoff) return usbHandoffWrite(lun, lba, offset, buffer, bufsize);
+#endif
 
   bool rc = 0;
 

@@ -44,6 +44,7 @@
 #include <ZuluSCSI_settings.h>
 #include "ZuluSCSI_usb_console_media.h"
 #include "ZuluSCSI_usb_console_erase.h"
+#include "ZuluSCSI_usb_handoff.h"
 #include "ZuluSCSI_sd_trimcheck.h"
 #ifdef ZULUCONTROL_FIRMWARE 
 #include <ZuluSCSI_WebUI.h>
@@ -2139,6 +2140,12 @@ static usb_input_type_t serial_menu(menu_context_t context)
     if(available > 0)
     {
         int32_t read = Serial.read();
+
+        // '@' command lines of the USB media handoff
+        if (context == MENU_CONTEXT_TARGET_MAIN && usbHandoffSerialInput((char)read))
+        {
+            return USB_INPUT_NONE;
+        }
 
         // Route to the media submenu while it is active
         if (serialMediaMenuActive())

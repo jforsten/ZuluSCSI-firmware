@@ -790,6 +790,11 @@ static void process_Command()
 	{
 		// already handled
 	}
+	// The medium is handed to the USB host: nothing below may access it
+	else if (scsiDiskRefuseMediaAccess())
+	{
+		// Status and sense codes already set
+	}
 	// Handle odd device types first that may override basic read and
 	// write commands. Will fall-through to generic disk handling.
 	// Some device specific vendor commands are located here instead

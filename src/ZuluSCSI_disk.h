@@ -67,6 +67,10 @@ struct image_config_t: public S2S_TargetCfg
     bool reinsert_after_eject; // Reinsert next image after ejection
     bool eject_on_stop; // Eject image on START STOP UNIT with start = 0
 
+    // The media is handed to the USB host (see ZuluSCSI_usb_handoff.h).
+    // The drive stays ejected until USB gives the media back.
+    bool usb_hold;
+
     // selects a physical button channel that will cause an eject action
     // default option of '0' disables this functionality
     uint8_t ejectButton;

@@ -57,4 +57,8 @@ int scsiDiskCommand(void);
 void scsiDiskReportLUNs(void);
 int doTestUnitReady();
 
+// Refuses the current command if it needs the medium and the medium is
+// handed to the USB host. Returns 1 if it was refused.
+int scsiDiskRefuseMediaAccess(void);
+
 #endif

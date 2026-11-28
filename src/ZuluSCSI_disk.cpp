@@ -66,6 +66,7 @@ extern "C" {
 #include "ZuluSCSI_unmap.h"
 #include "ZuluSCSI_gap_layout.h"
 #endif
+#include "ZuluSCSI_usb_handoff.h"
 
 #ifndef PLATFORM_MAX_SCSI_SPEED
 #define PLATFORM_MAX_SCSI_SPEED S2S_CFG_SPEED_ASYNC_50
@@ -305,6 +306,11 @@ void image_config_t::setDeviceType(S2S_CFG_TYPE device_type)
 
 void image_config_t::clear()
 {
+    if (usb_hold)
+    {
+        usbHandoffRevoke(scsiId & S2S_CFG_TARGET_ID_BITS);
+    }
+
     if (deviceType == S2S_CFG_SEQUENTIAL)
     {
         tapeDeinit(S2S_CFG_TARGET_ID_BITS & scsiId);
@@ -369,6 +375,9 @@ uint32_t image_config_t::get_capacity_lba()
 
 void scsiDiskCloseSDCardImages()
 {
+    // USB must not keep using the card sectors of images that are closed
+    usbHandoffRevokeAll();
+
     for (int i = 0; i < S2S_MAX_TARGETS; i++)
     {
         if (!g_DiskImages[i].file.isRom())
@@ -565,6 +574,11 @@ static bool isProcessorDevice(S2S_CFG_TYPE type)
 bool scsiDiskOpenHDDImage(int target_idx, const char *filename, int scsi_lun, int blocksize, S2S_CFG_TYPE type, bool use_prefix)
 {
     image_config_t &img = g_DiskImages[target_idx];
+
+    // The image of this target is about to be replaced. If USB has the media
+    // of the old one, it must stop using it first.
+    usbHandoffRevoke(target_idx);
+
     img.cuesheetfile.close();
     img.bin_container.close();
     img.cdrom_binfile_index = -1;
@@ -1357,6 +1371,58 @@ static bool compare_prefix(const char* name, const char* compare)
     return false;
 }
 
+/************************************/
+/* Media handed to the USB host     */
+/************************************/
+
+// While the media of a removable drive is handed to the USB host (see
+// ZuluSCSI_usb_handoff.h) the SCSI host must not get at the image: the two
+// would read and write the same sectors without knowing of each other.
+// The ejected state alone does not prevent that, it only makes TEST UNIT
+// READY fail; reads and writes of disk type devices are still served.
+//
+// Called from scsi.c for every command before the device handlers run.
+// Returns 1 if the command was refused with NOT READY, MEDIUM NOT PRESENT.
+// Commands that do not touch the medium are let through. The list is of
+// what is allowed, so that a command nobody thought of is refused.
+extern "C" int scsiDiskRefuseMediaAccess()
+{
+    image_config_t &img = *(image_config_t*)scsiDev.target->cfg;
+    if (likely(!img.usb_hold))
+    {
+        return 0;
+    }
+
+    switch (scsiDev.cdb[0])
+    {
+        case 0x00: // TEST UNIT READY, doTestUnitReady() answers NOT READY
+        case 0x06: // Iomega Zip vendor sense
+        case 0x15: // MODE SELECT(6)
+        case 0x1A: // MODE SENSE(6)
+        case 0x1B: // START STOP UNIT, scsiDiskCloseTray() ignores the start
+        case 0x1C: // RECEIVE DIAGNOSTIC RESULTS
+        case 0x1D: // SEND DIAGNOSTIC
+        case 0x1E: // PREVENT ALLOW MEDIUM REMOVAL
+        case 0x3B: // WRITE BUFFER
+        case 0x3C: // READ BUFFER
+        case 0x4D: // LOG SENSE
+        case 0x55: // MODE SELECT(10)
+        case 0x5A: // MODE SENSE(10)
+            return 0;
+
+        default:
+            break;
+    }
+
+    dbgmsg("------ Command ", scsiDev.cdb[0], " refused on ID ", (int)(img.scsiId & S2S_CFG_TARGET_ID_BITS),
+           ", media is handed to USB");
+    scsiDev.status = CHECK_CONDITION;
+    scsiDev.target->sense.code = NOT_READY;
+    scsiDev.target->sense.asc = MEDIUM_NOT_PRESENT;
+    scsiDev.phase = STATUS;
+    return 1;
+}
+
 /***********************/
 /* Start/stop commands */
 /***********************/
@@ -1365,6 +1431,13 @@ void scsiDiskCloseTray(image_config_t &img)
     if (img.ejected)
     {
         uint8_t target = img.scsiId & S2S_CFG_TARGET_ID_BITS;
+        if (img.usb_hold)
+        {
+            // The USB host has the media. Only the USB media handoff puts it
+            // back, whatever asks for a reinsert meanwhile.
+            dbgmsg("------ Device close tray on ID ", (int)target, " ignored, media is handed to USB");
+            return;
+        }
         // A finite tape set remains unloaded after its last IMG entry.
         // Do not silently reinsert the prior volume on INQUIRY or START.
         if (img.deviceType == S2S_CFG_SEQUENTIAL &&

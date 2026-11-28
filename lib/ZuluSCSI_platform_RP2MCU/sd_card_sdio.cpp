@@ -92,6 +92,44 @@ static const uint8_t *m_stream_buffer;
 static uint32_t m_stream_count;
 static uint32_t m_stream_count_start;
 
+#ifdef PLATFORM_HAS_USB_MEDIA_HANDOFF
+// The callback is not called while this is set, see platform_sd_callback_suspend()
+static bool m_stream_suspended;
+
+// Optional guard held for the duration of every operation on the card.
+// Used by the USB media handoff to keep the USB stack from starting an SD
+// card access of its own in the middle of one that is already running.
+static bool (*g_sd_guard_enter)(void);
+static void (*g_sd_guard_leave)(void);
+
+void platform_sd_set_bus_guard(bool (*enter)(void), void (*leave)(void))
+{
+    g_sd_guard_leave = leave;
+    g_sd_guard_enter = enter;
+}
+
+void platform_sd_callback_suspend(bool suspend)
+{
+    m_stream_suspended = suspend;
+}
+
+namespace {
+// Nested operations (readSectors() calling readSector(), for example) find
+// the guard already taken and leave it to the outermost one.
+struct SdBusGuard
+{
+    bool m_held;
+    SdBusGuard(): m_held(g_sd_guard_enter && g_sd_guard_enter()) {}
+    ~SdBusGuard() { if (m_held) g_sd_guard_leave(); }
+};
+}
+#define SD_BUS_GUARD() SdBusGuard sd_bus_guard
+#define SD_STREAM_SUSPENDED() (m_stream_suspended)
+#else
+#define SD_BUS_GUARD() do {} while (0)
+#define SD_STREAM_SUSPENDED() (false)
+#endif
+
 void platform_set_sd_callback(sd_callback_t func, const uint8_t *buffer)
 {
     m_stream_callback = func;
@@ -102,6 +140,12 @@ void platform_set_sd_callback(sd_callback_t func, const uint8_t *buffer)
 
 static sd_callback_t get_stream_callback(const uint8_t *buf, uint32_t count, const char *accesstype, uint32_t sector)
 {
+    if (SD_STREAM_SUSPENDED())
+    {
+        // Not part of the transfer the callback belongs to
+        return NULL;
+    }
+
     m_stream_count_start = m_stream_count;
 
     if (m_stream_callback)
@@ -124,6 +168,7 @@ static sd_callback_t get_stream_callback(const uint8_t *buf, uint32_t count, con
 
 bool SdioCard::begin(SdioConfig sdioConfig)
 {
+    SD_BUS_GUARD();
     uint32_t reply;
     sdio_status_t status;
     
@@ -305,6 +350,7 @@ bool SdioCard::readSDS(sds_t* sds)
 
 bool SdioCard::readOCR(uint32_t* ocr)
 {
+    SD_BUS_GUARD();
     // SDIO mode does not have CMD58, but main program uses this to
     // poll for card presence. Return status register instead.
     return checkReturnOk(rp2040_sdio_command_R1(CMD13, g_sdio_rca, ocr));
@@ -335,6 +381,7 @@ uint32_t SdioCard::sectorCount()
 
 uint32_t SdioCard::status()
 {
+    SD_BUS_GUARD();
     uint32_t reply;
     if (checkReturnOk(rp2040_sdio_command_R1(CMD13, g_sdio_rca, &reply)))
         return reply;
@@ -344,6 +391,7 @@ uint32_t SdioCard::status()
 
 bool SdioCard::stopTransmission(bool blocking)
 {
+    SD_BUS_GUARD();
     uint32_t reply;
     if (!checkReturnOk(rp2040_sdio_command_R1(CMD12, 0, &reply)))
     {
@@ -359,7 +407,7 @@ bool SdioCard::stopTransmission(bool blocking)
         uint32_t start = millis();
         while ((uint32_t)(millis() - start) < 5000 && isBusy())
         {
-            if (m_stream_callback)
+            if (m_stream_callback && !SD_STREAM_SUSPENDED())
             {
                 m_stream_callback(m_stream_count);
             }
@@ -420,6 +468,7 @@ bool SdioCard::writeStop()
 
 bool SdioCard::erase(uint32_t firstSector, uint32_t lastSector)
 {
+    SD_BUS_GUARD();
     if (m_curState != IDLE_STATE)
     {
         stopTransmission(true);
@@ -486,6 +535,7 @@ bool SdioCard::readSCR(scr_t* scr) {
 
 bool SdioCard::writeSector(uint32_t sector, const uint8_t* src)
 {
+    SD_BUS_GUARD();
     if (((uint32_t)src & 3) != 0)
     {
         // Buffer is not aligned, need to memcpy() the data to a temporary buffer.
@@ -528,6 +578,7 @@ bool SdioCard::writeSector(uint32_t sector, const uint8_t* src)
 
 bool SdioCard::writeSectors(uint32_t sector, const uint8_t* src, size_t n)
 {
+    SD_BUS_GUARD();
     if (((uint32_t)src & 3) != 0)
     {
         // Unaligned write, execute sector-by-sector
@@ -585,6 +636,7 @@ bool SdioCard::writeSectors(uint32_t sector, const uint8_t* src, size_t n)
 
 bool SdioCard::readSector(uint32_t sector, uint8_t* dst)
 {
+    SD_BUS_GUARD();
     uint8_t *real_dst = dst;
     if (((uint32_t)dst & 3) != 0)
     {
@@ -631,6 +683,7 @@ bool SdioCard::readSector(uint32_t sector, uint8_t* dst)
 
 bool SdioCard::readSectors(uint32_t sector, uint8_t* dst, size_t n)
 {
+    SD_BUS_GUARD();
     if (((uint32_t)dst & 3) != 0 || sector + n >= g_sdio_sector_count)
     {
         // Unaligned read or end-of-drive read, execute sector-by-sector
