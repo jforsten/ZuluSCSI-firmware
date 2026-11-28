@@ -65,8 +65,8 @@ extern "C" {
 #include "ZuluSCSI_sd_zero.h"
 #include "ZuluSCSI_unmap.h"
 #include "ZuluSCSI_gap_layout.h"
-#include "ZuluSCSI_usb_handoff.h"
 #endif
+#include "ZuluSCSI_usb_handoff.h"
 
 #ifndef PLATFORM_MAX_SCSI_SPEED
 #define PLATFORM_MAX_SCSI_SPEED S2S_CFG_SPEED_ASYNC_50

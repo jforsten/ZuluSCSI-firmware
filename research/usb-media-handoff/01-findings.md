@@ -160,4 +160,6 @@ told that the medium changed.
 - RP2350 boards use the external `SDIO_RP2350` library; the same hooks would be
   needed there. Not done.
 - GD32 boards (ZuluSCSI v1.x) use the vendor USB stack and have no image mode.
-  Separate port, not done.
+  Separate port, not done. Upstream releases their firmware from the branch
+  `LTS/V1.x`, not from `main`, so a change based on `main` does not reach
+  them unless it is ported there.

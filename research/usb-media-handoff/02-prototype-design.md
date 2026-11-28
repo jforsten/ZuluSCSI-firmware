@@ -342,7 +342,13 @@ against that pattern. It is not an Ensoniq disk.
   (flash 442,208 bytes, RAM 187,416 bytes). The handoff functions are present
   in the linked firmware.
 - `ZuluSCSI_Pico_2` (RP2350, feature compiled out) still builds, and contains
-  none of the handoff code. GD32 builds were not tried.
+  none of the handoff code.
+- GD32 builds, tried on 2026-11-28: `ZuluSCSIv1_0` and `ZuluSCSIv1_0_mini`
+  build (feature compiled out). Until then they did not compile, because
+  `ZuluSCSI_disk.cpp` included the handoff header inside an RP2-only block.
+  `ZuluSCSIv1_1_plus` does not link, with or without this branch: its
+  bootloader is 776 bytes over the 32 kB limit on `main` at `24f1578`
+  (792 bytes with the branch). No GD32 build was run on hardware.
 - Installed on a ZuluSCSI Mini RP2040 through the SD card update (from stock
   23.09.06, keeping that bootloader). It boots, reports USB ID 2E8A:10D7
   "ZuluSCSI RP2040" with a serial port and one storage drive.
