@@ -105,6 +105,19 @@ covers every automatic reinsert path (status poll, INQUIRY, START UNIT, eject
 button, media menu). The handoff does not call `doPerformEject()`, because
 that would switch to the next image on a multi-image device.
 
+The ejected state by itself only makes TEST UNIT READY fail. Reads and
+writes of a disk type device would still be served, so a SCSI host that
+loads or saves without checking readiness first would get at the image
+while USB has it. `scsiDiskRefuseMediaAccess()` closes that: `scsi.c` calls
+it for every command before the device handlers, and while `usb_hold` is
+set it answers NOT READY / MEDIUM NOT PRESENT to everything except a fixed
+list of commands that do not touch the medium (TEST UNIT READY, MODE
+SENSE/SELECT, START STOP UNIT, PREVENT ALLOW MEDIUM REMOVAL, diagnostics,
+READ/WRITE BUFFER, LOG SENSE, the Iomega sense command; INQUIRY and REQUEST
+SENSE are answered earlier). The list names what is allowed, so a command
+nobody thought of is refused. This check was missing in the first three
+commits of the branch.
+
 On the USB side the callbacks use a snapshot taken at `@take`: first SD
 sector, sector count, writable flag. They never touch the `ImageBackingStore`
 object or SdFat, only `SD.card()->readSectors()/writeSectors()`. Ownership is a
@@ -238,7 +251,8 @@ What is left, not done:
 |---|---|
 | `src/ZuluSCSI_usb_handoff.{h,cpp}` | New. State, take/give/revoke, USB callback backends, write buffer, serial command parser. |
 | `src/ZuluSCSI.cpp` | Start the handoff after images are opened; poll at bus free; revoke on card removal. |
-| `src/ZuluSCSI_disk.{h,cpp}` | `usb_hold` flag; guard in `scsiDiskCloseTray()`; revoke hooks. |
+| `src/ZuluSCSI_disk.{h,cpp}` | `usb_hold` flag; guard in `scsiDiskCloseTray()`; revoke hooks; `scsiDiskRefuseMediaAccess()`. |
+| `lib/SCSI2SD/src/firmware/scsi.c`, `disk.h` | Call `scsiDiskRefuseMediaAccess()` before the device command handlers. |
 | `src/ZuluSCSI_settings.cpp`, `zuluscsi.ini` | `USBMediaHandoff` setting. |
 | `lib/ZuluSCSI_platform_RP2MCU/ZuluSCSI_platform_msc.cpp` | Register storage at boot without blocking; route callbacks to the handoff. |
 | `lib/ZuluSCSI_platform_RP2MCU/sd_card_sdio.cpp` | Bus guard and stream callback suspend. |
@@ -390,5 +404,15 @@ against that pattern. It is not an Ensoniq disk.
 - `@status` answered in about 0.3 s while a USB write was running.
 - No `io-error`, `write-failed`, `write-lost` or `revoke` events.
 - Not exercised: the write failure paths, since no card write failed.
+
+2026-11-28, firmware with `scsiDiskRefuseMediaAccess()` (built 02:12):
+
+- The refusal of SCSI media commands while USB has the media **has not been
+  tested**: it needs a SCSI host. Checked by reading the code only. This is
+  the first thing to verify with the sampler: with the media taken, a load
+  and a save on the sampler must both fail without touching the image.
+- USB side re-checked after the change: 4 MB written at 664 kB/s, `@give`
+  and `@take`, whole image read back correct at 754 kB/s, eject from Windows
+  gives the media back. No error events.
 
 Update this section as steps are verified.

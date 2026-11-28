@@ -6,23 +6,26 @@ build does not depend on the `.pio` build folder.
 
 | File | Use | SHA-256 |
 |---|---|---|
-| `ZuluSCSI_RP2040_handoff-prototype.bin` | SD card update | `fa1ccc0f94e7c1227aaa1d6e130465fd11443e03761f9d5c73f3119c292e1252` |
-| `ZuluSCSI_RP2040_handoff-prototype.uf2` | USB bootloader (BOOTSEL) | `9296916fff4dc87009719264d4b090e05941f9915652de00c5507065eb19048b` |
+| `ZuluSCSI_RP2040_handoff-prototype.bin` | SD card update | `af61cf20d0bf9bcff64c530f5ec2ff42c21459edc4feee977d2a3fbbc09e7cd6` |
+| `ZuluSCSI_RP2040_handoff-prototype.uf2` | USB bootloader (BOOTSEL) | `7cbc657344d84a3d8c3ccdd1b900185ab13a683b3212eaf1086be17b20109e5c` |
 
-- Built 2026-11-28 01:30 from the source in the commit that carries these
+- Built 2026-11-28 02:12 from the source in the commit that carries these
   files. The firmware reports itself as
-  `2026.11.24-release 2026-11-28T01:30:09 git:f6511b8-dirty`, because it was
-  built before that commit existed (`f6511b8` is the commit before it).
+  `2026.11.24-release 2026-11-28T02:12:46 git:48fce31-dirty`, because it was
+  built before that commit existed (`48fce31` is the commit before it).
 - The `.uf2` is the build installed on the test board and used for the
-  write-buffer tests dated 2026-11-28 in
+  last tests dated 2026-11-28 in
   [../02-prototype-design.md](../02-prototype-design.md). The `.bin` comes
   from the same build but was not installed.
 - History of the builds kept here:
   - `a0a0d24`, tested 2026-11-27: first prototype.
   - `a003760`: services the USB stack on every main-loop pass while USB has
     the media. Reads about 16% faster.
-  - this build: buffers USB writes and writes them to the SD card from the
+  - `48fce31`: buffers USB writes and writes them to the SD card from the
     main loop. Writes about 27% faster.
+  - this build: refuses SCSI commands that need the medium while USB has
+    it. **Earlier builds do not**, so they must not be used with a SCSI host
+    that might read or write during a handoff.
 
 ## Installing
 

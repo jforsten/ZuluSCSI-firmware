@@ -101,9 +101,16 @@ told that the medium changed.
 
 - **Removable device types**: CD-ROM, Zip 100 (`S2S_CFG_ZIP100`, image prefix
   `ZP`), removable disk, MO, floppy, tape.
-- **Ejected state**: `image_config_t::ejected`. While set, media access
-  commands return NOT READY / MEDIUM NOT PRESENT before any SD read
-  (`src/ZuluSCSI_disk.cpp`, the ready check). The image file stays open.
+- **Ejected state**: `image_config_t::ejected`. While set, TEST UNIT READY
+  returns NOT READY / MEDIUM NOT PRESENT (`doTestUnitReady()` in
+  `src/ZuluSCSI_disk.cpp`), and the CD-ROM code refuses its own commands. The
+  image file stays open.
+  **Reads and writes of disk type devices (Zip, removable, MO) are not
+  refused**: `scsi.c` calls `scsiDiskCommand()` before any readiness check,
+  and `scsiDiskStartRead()` / `scsiDiskStartWrite()` do not look at the
+  flag. An earlier version of this note claimed that all media access was
+  refused; that was wrong, and the prototype relied on it until the check
+  described in 02-prototype-design.md ("Ownership") was added.
 - **Reinsert**: `scsiDiskCloseTray()` clears the flag and posts UNIT ATTENTION
   "medium may have changed" when `EnableUnitAttention` is on.
 - **Auto reinsert**: with default settings the tray closes itself on the

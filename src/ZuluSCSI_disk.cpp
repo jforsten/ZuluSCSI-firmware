@@ -1371,6 +1371,58 @@ static bool compare_prefix(const char* name, const char* compare)
     return false;
 }
 
+/************************************/
+/* Media handed to the USB host     */
+/************************************/
+
+// While the media of a removable drive is handed to the USB host (see
+// ZuluSCSI_usb_handoff.h) the SCSI host must not get at the image: the two
+// would read and write the same sectors without knowing of each other.
+// The ejected state alone does not prevent that, it only makes TEST UNIT
+// READY fail; reads and writes of disk type devices are still served.
+//
+// Called from scsi.c for every command before the device handlers run.
+// Returns 1 if the command was refused with NOT READY, MEDIUM NOT PRESENT.
+// Commands that do not touch the medium are let through. The list is of
+// what is allowed, so that a command nobody thought of is refused.
+extern "C" int scsiDiskRefuseMediaAccess()
+{
+    image_config_t &img = *(image_config_t*)scsiDev.target->cfg;
+    if (likely(!img.usb_hold))
+    {
+        return 0;
+    }
+
+    switch (scsiDev.cdb[0])
+    {
+        case 0x00: // TEST UNIT READY, doTestUnitReady() answers NOT READY
+        case 0x06: // Iomega Zip vendor sense
+        case 0x15: // MODE SELECT(6)
+        case 0x1A: // MODE SENSE(6)
+        case 0x1B: // START STOP UNIT, scsiDiskCloseTray() ignores the start
+        case 0x1C: // RECEIVE DIAGNOSTIC RESULTS
+        case 0x1D: // SEND DIAGNOSTIC
+        case 0x1E: // PREVENT ALLOW MEDIUM REMOVAL
+        case 0x3B: // WRITE BUFFER
+        case 0x3C: // READ BUFFER
+        case 0x4D: // LOG SENSE
+        case 0x55: // MODE SELECT(10)
+        case 0x5A: // MODE SENSE(10)
+            return 0;
+
+        default:
+            break;
+    }
+
+    dbgmsg("------ Command ", scsiDev.cdb[0], " refused on ID ", (int)(img.scsiId & S2S_CFG_TARGET_ID_BITS),
+           ", media is handed to USB");
+    scsiDev.status = CHECK_CONDITION;
+    scsiDev.target->sense.code = NOT_READY;
+    scsiDev.target->sense.asc = MEDIUM_NOT_PRESENT;
+    scsiDev.phase = STATUS;
+    return 1;
+}
+
 /***********************/
 /* Start/stop commands */
 /***********************/

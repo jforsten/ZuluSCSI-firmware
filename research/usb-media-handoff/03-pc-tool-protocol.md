@@ -226,8 +226,9 @@ that time.
 
 ## What the SCSI host sees
 
-- During the handoff: the drive answers but reports NOT READY, medium not
-  present.
+- During the handoff: the drive answers, but every command that needs the
+  medium (read, write, read capacity, format, verify and so on) is refused
+  with NOT READY, medium not present. Not yet tested with a host.
 - After `@give`: with `EnableUnitAttention = 1` the next command gets UNIT
   ATTENTION, "medium may have changed", once. The host is expected to
   re-read the disk. Whether an Ensoniq sampler does that by itself has not
